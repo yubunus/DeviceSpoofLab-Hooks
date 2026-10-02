@@ -2,12 +2,8 @@ package com.devicespooflab.hooks.hooks;
 
 import com.devicespooflab.hooks.utils.ConfigManager;
 
-import java.lang.reflect.Method;
 import java.net.NetworkInterface;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Enumeration;
-import java.util.List;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -58,7 +54,11 @@ public class NetworkHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            param.setResult("\"" + ConfigManager.getWifiSsid() + "\"");
+                            // Android quotes an SSID and leaves the "unknown"
+                            // marker bare.
+                            String ssid = ConfigManager.getWifiSsid();
+                            param.setResult(ssid.isEmpty()
+                                    ? "<unknown ssid>" : "\"" + ssid + "\"");
                         }
                     });
         } catch (Throwable t) { logFail("WifiInfo.getSSID", t); }
@@ -144,33 +144,8 @@ public class NetworkHooks {
                     });
         } catch (Throwable t) { logFail("NetworkInterface.getHardwareAddress", t); }
 
-        try {
-            XposedHelpers.findAndHookMethod(NetworkInterface.class, "getNetworkInterfaces",
-                    new XC_MethodHook() {
-                        @Override
-                        @SuppressWarnings("unchecked")
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            Enumeration<NetworkInterface> orig =
-                                    (Enumeration<NetworkInterface>) param.getResult();
-                            if (orig == null) return;
-
-                            // Filter out interfaces named "rmnet*" / "ccmni*" / "p2p*"
-                            // which leak modem/p2p details on emulators.
-                            List<NetworkInterface> kept = new ArrayList<>();
-                            while (orig.hasMoreElements()) {
-                                NetworkInterface ni = orig.nextElement();
-                                String n = (ni == null) ? "" : ni.getName();
-                                if (n == null) continue;
-                                if (n.startsWith("rmnet") || n.startsWith("ccmni")
-                                        || n.startsWith("p2p") || n.startsWith("dummy")) {
-                                    continue;
-                                }
-                                kept.add(ni);
-                            }
-                            param.setResult(Collections.enumeration(kept));
-                        }
-                    });
-        } catch (Throwable t) { logFail("NetworkInterface.getNetworkInterfaces", t); }
+        // The interface list itself is left alone: every phone has its rmnet,
+        // dummy and p2p interfaces, and a list without them stands out.
     }
 
     private static byte[] macStringToBytes(String mac) {

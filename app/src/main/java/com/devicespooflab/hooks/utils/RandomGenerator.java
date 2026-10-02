@@ -25,6 +25,18 @@ public class RandomGenerator {
         return imeiWithoutCheck + checkDigit;
     }
 
+    // The IMEI a phone's next SIM slot carries: same TAC, serial number + 1,
+    // check digit recomputed. Anything that isn't a 15-digit IMEI comes back
+    // unchanged.
+    public static String nextImei(String imei) {
+        if (imei == null || !imei.matches("\\d{15}")) {
+            return imei;
+        }
+        int serial = (Integer.parseInt(imei.substring(8, 14)) + 1) % 1000000;
+        String body = imei.substring(0, 8) + String.format(Locale.US, "%06d", serial);
+        return body + calculateLuhnCheckDigit(body);
+    }
+
     public static String generateMEID() {
         StringBuilder meid = new StringBuilder();
         String hexChars = "0123456789ABCDEF";
@@ -162,6 +174,17 @@ public class RandomGenerator {
             hex.append(hexChars.charAt(random.nextInt(16)));
         }
         return safeBootloaderPrefix(configuredPrefix) + "-" + hex.toString();
+    }
+
+    // Same shape as above, but stable: derived from seedSource instead of
+    // drawn at random. A blank source falls back to a random value.
+    public static String generateBootloader(String configuredPrefix, String seedSource) {
+        if (seedSource == null || seedSource.isEmpty()) {
+            return generateBootloader(configuredPrefix);
+        }
+        long seed = stableSeed(configuredPrefix + "/" + seedSource);
+        return safeBootloaderPrefix(configuredPrefix) + "-"
+                + String.format(Locale.US, "%08X", (int) (seed ^ (seed >>> 32)));
     }
 
     public static String generateSecurityPatch() {

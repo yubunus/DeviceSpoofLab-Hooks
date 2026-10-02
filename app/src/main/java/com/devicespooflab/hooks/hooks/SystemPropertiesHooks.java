@@ -34,6 +34,8 @@ public class SystemPropertiesHooks {
         }
     }
 
+    // A spoofed value can be empty: the property then reads as unset, and the
+    // typed getters fall back to the caller's default the way the real ones do.
     private static void hookSystemProperties(ClassLoader classLoader) {
         Class<?> sysPropClass = XposedHelpers.findClassIfExists(SYSTEM_PROPERTIES_CLASS, classLoader);
 
@@ -52,7 +54,6 @@ public class SystemPropertiesHooks {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         String key = (String) param.args[0];
-                        String originalValue = (String) param.getResult();
                         String spoofedValue = ConfigManager.getSystemProperty(key, null);
 
                         if (spoofedValue != null) {
@@ -72,11 +73,14 @@ public class SystemPropertiesHooks {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         String key = (String) param.args[0];
-                        String defaultValue = (String) param.args[1];
                         String spoofedValue = ConfigManager.getSystemProperty(key, null);
 
                         if (spoofedValue != null) {
-                            param.setResult(spoofedValue);
+                            // An unset property gives the default; a null default
+                            // gives the empty string.
+                            Object def = param.args[1];
+                            param.setResult(!spoofedValue.isEmpty() ? spoofedValue
+                                    : def != null ? def : "");
                         }
                     }
                 });
@@ -96,10 +100,9 @@ public class SystemPropertiesHooks {
 
                         if (spoofedValue != null) {
                             try {
-                                int intValue = Integer.parseInt(spoofedValue);
-                                param.setResult(intValue);
+                                param.setResult(Integer.parseInt(spoofedValue));
                             } catch (NumberFormatException e) {
-                                // Invalid int value, keep original
+                                param.setResult(param.args[1]);
                             }
                         }
                     }
@@ -119,10 +122,17 @@ public class SystemPropertiesHooks {
                         String spoofedValue = ConfigManager.getSystemProperty(key, null);
 
                         if (spoofedValue != null) {
-                            // Handle both "true"/"false" and "1"/"0"
-                            boolean boolValue = spoofedValue.equals("1") ||
-                                              spoofedValue.equalsIgnoreCase("true");
-                            param.setResult(boolValue);
+                            // Same words the platform accepts; anything else is the default.
+                            switch (spoofedValue) {
+                                case "1": case "y": case "yes": case "on": case "true":
+                                    param.setResult(true);
+                                    break;
+                                case "0": case "n": case "no": case "off": case "false":
+                                    param.setResult(false);
+                                    break;
+                                default:
+                                    param.setResult(param.args[1]);
+                            }
                         }
                     }
                 });
@@ -142,10 +152,9 @@ public class SystemPropertiesHooks {
 
                         if (spoofedValue != null) {
                             try {
-                                long longValue = Long.parseLong(spoofedValue);
-                                param.setResult(longValue);
+                                param.setResult(Long.parseLong(spoofedValue));
                             } catch (NumberFormatException e) {
-                                // Invalid long value, keep original
+                                param.setResult(param.args[1]);
                             }
                         }
                     }

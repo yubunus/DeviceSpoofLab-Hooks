@@ -35,13 +35,14 @@
             android:name="xposedminversion"
             android:value="82" />
 
-        <!-- Semicolon-separated string instead of @array resource. Vector's
-             parasitic Manager (running inside com.android.shell) fails on
-             getResourcesForApplication for some packages, which silently
-             swallows the resource-array path; the string path always works. -->
-        <meta-data
-            android:name="xposedscope"
-            android:value="com.google.android.gms" />
+        <!-- No xposedscope: the module recommends no apps. The Advertising ID
+             and App Set ID are rewritten inside each scoped app, so Play
+             services does not have to be in the scope. If a recommended scope
+             is ever added, write it as a semicolon-separated string, not an
+             @array resource: Vector's parasitic Manager (running inside
+             com.android.shell) fails on getResourcesForApplication for some
+             packages, which silently swallows the resource-array path; the
+             string path always works. -->
 
     </application>
 

@@ -14,11 +14,9 @@ public class AccountHooks {
 
     private static final String TAG = "DeviceSpoofLab-Account";
 
+    // Installed once the switch is on; the hooks check it again on every call,
+    // so it can be turned off without restarting the app.
     public static void hook(XC_LoadPackage.LoadPackageParam lpparam) {
-        if (!ConfigManager.isHideAccountsEnabled()) {
-            return;
-        }
-
         Class<?> am = XposedHelpers.findClassIfExists(
                 "android.accounts.AccountManager", lpparam.classLoader);
         if (am == null) return;
@@ -28,7 +26,9 @@ public class AccountHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            param.setResult(new Account[0]);
+                            if (ConfigManager.isHideAccountsEnabled()) {
+                                param.setResult(new Account[0]);
+                            }
                         }
                     });
         } catch (Throwable t) {
@@ -41,7 +41,9 @@ public class AccountHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            param.setResult(new Account[0]);
+                            if (ConfigManager.isHideAccountsEnabled()) {
+                                param.setResult(new Account[0]);
+                            }
                         }
                     });
         } catch (Throwable t) { /* hidden API; may be missing */ }

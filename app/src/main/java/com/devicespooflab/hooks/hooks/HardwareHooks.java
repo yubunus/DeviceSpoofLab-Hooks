@@ -94,7 +94,12 @@ public class HardwareHooks {
                 new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        param.setResult(ConfigManager.getMemoryClassMb());
+                        // Unset = the real class, which is what the heap
+                        // limit of this process (Runtime.maxMemory) matches.
+                        int configured = ConfigManager.getMemoryClassMb();
+                        if (configured > 0) {
+                            param.setResult(configured);
+                        }
                     }
                 });
 
@@ -102,7 +107,10 @@ public class HardwareHooks {
                 new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        param.setResult(ConfigManager.getLargeMemoryClassMb());
+                        int configured = ConfigManager.getLargeMemoryClassMb();
+                        if (configured > 0) {
+                            param.setResult(configured);
+                        }
                     }
                 });
 

@@ -6,6 +6,7 @@
 
 namespace ds {
 std::unordered_map<std::string, std::string> g_props;
+std::unordered_map<std::string, std::string> g_settings;
 }  // namespace ds
 
 namespace {
@@ -80,19 +81,24 @@ bool LookupProperty(const char* name, std::string& out) {
     return true;
 }
 
+bool LookupSetting(const char* name, std::string& out) {
+    if (name == nullptr) return false;
+    auto it = g_settings.find(name);
+    if (it == g_settings.end() || it->second.empty()) return false;
+    out = it->second;
+    return true;
+}
+
 bool IsVerboseLoggingEnabled() {
-    auto it = g_props.find("debug.verbose");
-    if (it == g_props.end()) return false;
-    const std::string& v = it->second;
-    return v == "1" || v == "true" || v == "TRUE" || v == "yes"
-            || v == "YES" || v == "on" || v == "ON";
+    auto it = g_settings.find("debug.verbose");
+    return it != g_settings.end() && it->second == "1";
 }
 
 }  // namespace ds
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_devicespooflab_hooks_NativeHooks_nativeInstall(
-        JNIEnv* env, jclass /*cls*/, jobject java_map) {
+        JNIEnv* env, jclass /*cls*/, jobject java_props, jobject java_settings) {
     std::lock_guard<std::mutex> lock(g_install_mutex);
     if (g_installed.exchange(true)) {
         DS_LOGI("nativeInstall: already installed; ignoring");
@@ -100,17 +106,27 @@ Java_com_devicespooflab_hooks_NativeHooks_nativeInstall(
     }
 
     std::unordered_map<std::string, std::string> tmp;
-    if (!ReadJavaMap(env, java_map, tmp)) {
+    std::unordered_map<std::string, std::string> settings;
+    if (!ReadJavaMap(env, java_props, tmp) || !ReadJavaMap(env, java_settings, settings)) {
         DS_LOGE("nativeInstall: ReadJavaMap failed");
         g_installed = false;
         return -1;
     }
     ds::g_props = std::move(tmp);
+    ds::g_settings = std::move(settings);
     DS_LOGI("nativeInstall: parsed %zu entries from Java map",
             (size_t)ds::g_props.size());
 
-    ds::InstallPropertyHooks();
+    // Hook whatever app-owned libs are already mapped. Most apps load their
+    // native libs later, so NativeHooks re-drives this on each library load.
+    ds::HookAppLibraries();
     return (jint)ds::g_props.size();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_devicespooflab_hooks_NativeHooks_nativeRehook(
+        JNIEnv* /*env*/, jclass /*cls*/) {
+    return (jint)ds::HookAppLibraries();
 }
 
 extern "C" JNIEXPORT jstring JNICALL

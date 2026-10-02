@@ -20,33 +20,30 @@ int (*orig_uname)(struct utsname*) = nullptr;
 int (*orig_gethostname)(char*, size_t) = nullptr;
 int (*orig_getifaddrs)(struct ifaddrs**) = nullptr;
 
-std::string LookupOr(const char* key, const char* fallback) {
-    std::string out;
-    if (LookupProperty(key, out) && !out.empty()) return out;
-    return fallback ? fallback : "";
-}
-
+// Each kernel.* setting replaces its field; an unset one leaves the phone's
+// own. sysname and machine always stay (Linux / the process's architecture).
 int my_uname(struct utsname* u) {
     int rc = orig_uname ? orig_uname(u) : -1;
-    if (u != nullptr) {
-        std::string release = LookupOr("kernel.osrelease", "5.10.157-android13");
-        std::string version = LookupOr("kernel.version",
-                                       "#1 SMP PREEMPT Tue Dec  3 21:01:46 UTC 2024");
-        std::string nodename = LookupOr("kernel.hostname", "localhost");
-
-        // sysname/machine left as Linux/aarch64.
-        snprintf(u->release, sizeof(u->release), "%s", release.c_str());
-        snprintf(u->version, sizeof(u->version), "%s", version.c_str());
-        snprintf(u->nodename, sizeof(u->nodename), "%s", nodename.c_str());
+    if (rc == 0 && u != nullptr) {
+        std::string v;
+        if (LookupSetting("kernel.osrelease", v)) {
+            snprintf(u->release, sizeof(u->release), "%s", v.c_str());
+        }
+        if (LookupSetting("kernel.version", v)) {
+            snprintf(u->version, sizeof(u->version), "%s", v.c_str());
+        }
+        if (LookupSetting("kernel.hostname", v)) {
+            snprintf(u->nodename, sizeof(u->nodename), "%s", v.c_str());
+        }
     }
     return rc;
 }
 
 int my_gethostname(char* name, size_t len) {
-    if (name == nullptr || len == 0) {
+    std::string h;
+    if (name == nullptr || len == 0 || !LookupSetting("kernel.hostname", h)) {
         return orig_gethostname ? orig_gethostname(name, len) : -1;
     }
-    std::string h = LookupOr("kernel.hostname", "localhost");
     size_t n = h.size();
     if (n + 1 > len) n = len - 1;
     memcpy(name, h.data(), n);
@@ -75,8 +72,10 @@ int my_getifaddrs(struct ifaddrs** ifap) {
     int rc = orig_getifaddrs ? orig_getifaddrs(ifap) : -1;
     if (rc != 0 || ifap == nullptr || *ifap == nullptr) return rc;
 
-    std::string wifiMac = LookupOr("wifi.mac", "");
-    std::string btMac   = LookupOr("bluetooth.mac", "");
+    std::string wifiMac;
+    std::string btMac;
+    LookupSetting("wifi.mac", wifiMac);
+    LookupSetting("bluetooth.mac", btMac);
     uint8_t wifiBytes[6] = {0}, btBytes[6] = {0};
     bool haveWifi = !wifiMac.empty() && ParseMac(wifiMac, wifiBytes);
     bool haveBt   = !btMac.empty()   && ParseMac(btMac,   btBytes);
@@ -103,18 +102,19 @@ int my_getifaddrs(struct ifaddrs** ifap) {
 
 }  // namespace
 
-void InstallSystemHooks(dev_t dev, ino_t inode) {
-    bool ok_uname = lsplt::RegisterHook(dev, inode, "uname",
+// Registers the syscall PLT hooks for one app-owned library, bounded to
+// [offset, offset+size) so a library inside a shared .apk is hooked on its own.
+// The caller (HookAppLibraries) commits once after registering every library.
+void RegisterSystemSymbols(dev_t dev, ino_t inode, uintptr_t offset, size_t size) {
+    lsplt::RegisterHook(dev, inode, offset, size, "uname",
             reinterpret_cast<void*>(&my_uname),
             reinterpret_cast<void**>(&orig_uname));
-    bool ok_gh    = lsplt::RegisterHook(dev, inode, "gethostname",
+    lsplt::RegisterHook(dev, inode, offset, size, "gethostname",
             reinterpret_cast<void*>(&my_gethostname),
             reinterpret_cast<void**>(&orig_gethostname));
-    bool ok_gi    = lsplt::RegisterHook(dev, inode, "getifaddrs",
+    lsplt::RegisterHook(dev, inode, offset, size, "getifaddrs",
             reinterpret_cast<void*>(&my_getifaddrs),
             reinterpret_cast<void**>(&orig_getifaddrs));
-    DS_LOGI("system hooks: uname=%d gethostname=%d getifaddrs=%d",
-            ok_uname, ok_gh, ok_gi);
 }
 
 }  // namespace ds

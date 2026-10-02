@@ -19,19 +19,32 @@
     <string name="save_failed">Failed to save: %1$s</string>
     <string name="timezone_label">Timezone</string>
     <string name="timezone_dialog_title">Select timezone</string>
-    <string name="timezone_search_hint">Search…</string>
-
-    <!-- Populates the "Recommended" section in LSPosed Manager's scope picker.
-         The module's own process does NOT need to be ticked: the writable
-         IXposedService binder is delivered to our manifest-declared
-         XposedProvider when this UID starts (independent of hook scope), so
-         MainActivity publishes edits straight to RemotePreferences over that
-         binder. Self-scoping is unnecessary.
-         - com.google.android.gms is listed because AdvertisingIdHooks and
-           AppSetIdHooks have server-side hook paths that only run when GMS is
-           in scope; without it the client-side hooks still work but apps that
-           bypass them via raw AIDL will read the real ID from GMS. -->
-    <string-array name="xposed_scope">
-        <item>com.google.android.gms</item>
-    </string-array>
+    <string name="language_label">Language</string>
+    <string name="language_dialog_title">Select language</string>
+    <string name="display_spoof_label">Spoof screen size</string>
+    <string name="display_spoof_summary">May break app layouts. Restart target apps.</string>
+    <string name="advanced_label">Advanced</string>
+    <string name="native_props_label">Native property spoofing</string>
+    <string name="native_props_summary">Also covers properties an app reads from its own native code. Restart target apps.</string>
+    <string name="hide_accounts_label">Hide accounts</string>
+    <string name="hide_accounts_summary">Apps see no accounts on the device.</string>
+    <string name="verbose_label">Verbose logging</string>
+    <string name="verbose_summary">Writes hook status lines to the LSPosed log.</string>
+    <string name="search_hint">Search…</string>
+    <string name="device_label">Device</string>
+    <string name="action_choose_preset">Choose preset</string>
+    <string name="device_preset_dialog_title">Choose device</string>
+    <string name="device_edit_title">Edit device</string>
+    <string name="device_field_brand">Brand</string>
+    <string name="device_field_manufacturer">Manufacturer</string>
+    <string name="device_field_model">Model</string>
+    <string name="device_field_name">Product name</string>
+    <string name="device_field_device">Device codename</string>
+    <string name="device_field_board">Board</string>
+    <string name="device_field_hardware">Hardware</string>
+    <string name="device_field_platform">Platform</string>
+    <string name="device_field_build_id">Build ID</string>
+    <string name="device_field_incremental">Build incremental</string>
+    <string name="device_field_security_patch">Security patch</string>
+    <string name="device_field_fingerprint">Fingerprint (blank = auto)</string>
 </resources>

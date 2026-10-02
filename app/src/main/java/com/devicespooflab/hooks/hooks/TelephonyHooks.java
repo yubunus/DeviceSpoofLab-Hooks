@@ -30,15 +30,21 @@ public class TelephonyHooks {
         } catch (NoSuchMethodError ignored) {
         }
 
+        // Per slot: a dual-SIM phone has one IMEI for each of its two slots, and
+        // nothing beyond them.
+        XC_MethodHook slotImeiHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                int slot = (int) param.args[0];
+                if (slot < 0 || slot > 1) return;
+                String v = ConfigManager.getIMEI(slot);
+                if (v != null) param.setResult(v);
+            }
+        };
+
         try {
             XposedHelpers.findAndHookMethod(telephonyManager, "getDeviceId", int.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            String v = ConfigManager.getIMEI();
-                            if (v != null) param.setResult(v);
-                        }
-                    });
+                    slotImeiHook);
         } catch (NoSuchMethodError ignored) {
         }
 
@@ -56,13 +62,55 @@ public class TelephonyHooks {
 
         try {
             XposedHelpers.findAndHookMethod(telephonyManager, "getImei", int.class,
+                    slotImeiHook);
+        } catch (NoSuchMethodError ignored) {
+        }
+
+        // The first 8 digits of the IMEI / MEID, which name the phone model.
+        // Android hands these out without any permission.
+        try {
+            XposedHelpers.findAndHookMethod(telephonyManager, "getTypeAllocationCode",
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            String v = ConfigManager.getIMEI();
+                            String v = leadingCode(ConfigManager.getIMEI());
                             if (v != null) param.setResult(v);
                         }
                     });
+        } catch (NoSuchMethodError ignored) {
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(telephonyManager, "getTypeAllocationCode", int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            int slot = (int) param.args[0];
+                            if (slot < 0 || slot > 1) return;
+                            String v = leadingCode(ConfigManager.getIMEI(slot));
+                            if (v != null) param.setResult(v);
+                        }
+                    });
+        } catch (NoSuchMethodError ignored) {
+        }
+
+        XC_MethodHook manufacturerCodeHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                String v = leadingCode(ConfigManager.getMEID());
+                if (v != null) param.setResult(v);
+            }
+        };
+
+        try {
+            XposedHelpers.findAndHookMethod(telephonyManager, "getManufacturerCode",
+                    manufacturerCodeHook);
+        } catch (NoSuchMethodError ignored) {
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(telephonyManager, "getManufacturerCode", int.class,
+                    manufacturerCodeHook);
         } catch (NoSuchMethodError ignored) {
         }
 
@@ -270,5 +318,9 @@ public class TelephonyHooks {
             } catch (NoSuchMethodError ignored) {
             }
         }
+    }
+
+    private static String leadingCode(String id) {
+        return id != null && id.length() >= 8 ? id.substring(0, 8) : null;
     }
 }

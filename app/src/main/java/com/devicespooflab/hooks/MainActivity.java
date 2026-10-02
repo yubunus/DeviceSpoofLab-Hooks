@@ -30,6 +30,8 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import com.devicespooflab.hooks.ui.AndroidVersionTable;
+import com.devicespooflab.hooks.ui.DevicePresets;
+import com.devicespooflab.hooks.ui.DeviceProfile;
 import com.devicespooflab.hooks.ui.IdentifierItem;
 import com.devicespooflab.hooks.ui.IdentifierRegistry;
 import com.devicespooflab.hooks.utils.ConfigManager;
@@ -41,6 +43,7 @@ import com.google.android.material.materialswitch.MaterialSwitch;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -53,6 +56,7 @@ import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.IntConsumer;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -64,6 +68,8 @@ public class MainActivity extends AppCompatActivity {
     private MaterialSwitch selectAllSwitch;
     private CompoundButton.OnCheckedChangeListener selectAllListener;
 
+    private TextView deviceValue;
+
     private TextView androidVersionValue;
     private MaterialButton androidVersionMinus;
     private MaterialButton androidVersionPlus;
@@ -71,6 +77,19 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String TIMEZONE_PROPERTY = "persist.sys.timezone";
     private TextView timezoneValue;
+
+    private static final String LOCALE_LANGUAGE_PROPERTY = "locale.language";
+    private static final String LOCALE_COUNTRY_PROPERTY = "locale.country";
+    private static final String LOCALE_TAG_PROPERTY = "persist.sys.locale";
+    private TextView languageValue;
+
+    private static final String DISPLAY_SPOOF_PROPERTY = "hooks.spoof_display";
+    private static final String NATIVE_PROPS_PROPERTY = "hooks.native_props";
+    private static final String HIDE_ACCOUNTS_PROPERTY = "hooks.hide_accounts";
+    private static final String VERBOSE_PROPERTY = "debug.verbose";
+
+    // Set once the saved config has been moved off the pre-1.3 defaults.
+    private static final String DEFAULTS_MIGRATED_FLAG = "_defaults_v13";
 
     private final Handler debounceHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService persistExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -99,6 +118,7 @@ public class MainActivity extends AppCompatActivity {
         configFile = new File(getFilesDir(), "device_profile.conf");
         ensureConfigFile();
         ConfigManager.reload();
+        migrateLegacyDefaults();
         populateMissingValues();
         schedulePersist();
 
@@ -110,9 +130,20 @@ public class MainActivity extends AppCompatActivity {
             items.put(d.id, new IdentifierItem(d.id, d.displayName, value, enabled));
         }
 
+        wireDeviceCard();
         wireAndroidVersionStepper();
         populateTimezoneIfMissing();
         wireTimezonePicker();
+        populateLocaleIfMissing();
+        wireLanguagePicker();
+        wireFlagSwitch(R.id.display_spoof_switch, DISPLAY_SPOOF_PROPERTY,
+                ConfigManager.isDisplaySpoofEnabled());
+        wireFlagSwitch(R.id.native_props_switch, NATIVE_PROPS_PROPERTY,
+                ConfigManager.isNativePropsEnabled());
+        wireFlagSwitch(R.id.hide_accounts_switch, HIDE_ACCOUNTS_PROPERTY,
+                ConfigManager.isHideAccountsEnabled());
+        wireFlagSwitch(R.id.verbose_switch, VERBOSE_PROPERTY,
+                ConfigManager.isVerboseLoggingEnabled());
         wireRandomizeAll();
         buildSections();
 
@@ -168,6 +199,103 @@ public class MainActivity extends AppCompatActivity {
             if (invalidRow != null) invalidRow.setVisibility(d.isValid(newVal) ? View.GONE : View.VISIBLE);
         }
         schedulePersist();
+    }
+
+    private void wireDeviceCard() {
+        deviceValue = findViewById(R.id.device_value);
+        renderDeviceValue();
+        MaterialButton preset = findViewById(R.id.device_preset);
+        MaterialButton edit = findViewById(R.id.device_edit);
+        preset.setOnClickListener(v -> showPresetPicker());
+        edit.setOnClickListener(v -> showDeviceEditDialog());
+    }
+
+    private void renderDeviceValue() {
+        if (deviceValue == null) return;
+        String name = DeviceProfile.fromConfig().displayName();
+        deviceValue.setText(name.isEmpty() ? "—" : name);
+    }
+
+    private void showPresetPicker() {
+        final List<DeviceProfile> presets = DevicePresets.load(this);
+        String currentFingerprint = ConfigManager.getRawProperty("ro.build.fingerprint");
+        List<String> labels = new ArrayList<>(presets.size());
+        int checkedIdx = -1;
+        for (int i = 0; i < presets.size(); i++) {
+            DeviceProfile preset = presets.get(i);
+            labels.add(preset.label());
+            if (checkedIdx < 0 && preset.fingerprint().equals(currentFingerprint)) {
+                checkedIdx = i;
+            }
+        }
+        showSearchPicker(R.string.device_preset_dialog_title, labels, checkedIdx,
+                index -> applyDeviceProperties(presets.get(index).toProperties()));
+    }
+
+    private void showDeviceEditDialog() {
+        View view = LayoutInflater.from(this).inflate(R.layout.dialog_device_edit, null);
+        final DeviceProfile current = DeviceProfile.fromConfig();
+        EditText brand = bindField(view, R.id.field_brand, current.brand);
+        EditText manufacturer = bindField(view, R.id.field_manufacturer, current.manufacturer);
+        EditText model = bindField(view, R.id.field_model, current.model);
+        EditText name = bindField(view, R.id.field_name, current.name);
+        EditText device = bindField(view, R.id.field_device, current.device);
+        EditText board = bindField(view, R.id.field_board, current.board);
+        EditText hardware = bindField(view, R.id.field_hardware, current.hardware);
+        EditText platform = bindField(view, R.id.field_platform, current.platform);
+        EditText buildId = bindField(view, R.id.field_build_id, current.buildId);
+        EditText incremental = bindField(view, R.id.field_incremental, current.incremental);
+        EditText securityPatch = bindField(view, R.id.field_security_patch, current.securityPatch);
+        EditText fingerprint = bindField(view, R.id.field_fingerprint, current.fingerprint);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.device_edit_title)
+                .setView(view)
+                .setPositiveButton(R.string.dialog_save, (d, w) -> {
+                    DeviceProfile edited = DeviceProfile.fromConfig();
+                    edited.brand = fieldText(brand);
+                    edited.manufacturer = fieldText(manufacturer);
+                    edited.model = fieldText(model);
+                    edited.name = fieldText(name);
+                    edited.device = fieldText(device);
+                    edited.board = fieldText(board);
+                    edited.hardware = fieldText(hardware);
+                    edited.platform = fieldText(platform);
+                    edited.buildId = fieldText(buildId);
+                    edited.incremental = fieldText(incremental);
+                    edited.securityPatch = fieldText(securityPatch);
+                    // Fingerprints have no whitespace; drop line breaks from wrapping.
+                    edited.fingerprint = fieldText(fingerprint).replaceAll("\\s", "");
+                    applyDeviceProperties(DeviceProfile.changedProperties(current, edited));
+                })
+                .setNegativeButton(R.string.dialog_cancel, null)
+                .create();
+        dialog.show();
+        // Resize with the IME, so the fields scroll and Save / Cancel stay
+        // above the keyboard instead of behind it.
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        }
+    }
+
+    private void applyDeviceProperties(Map<String, String> updates) {
+        if (updates.isEmpty()) return;
+        ConfigManager.setProperties(updates);
+        schedulePersist();
+        renderDeviceValue();
+        androidVersionIdx = AndroidVersionTable.currentIndex();
+        renderAndroidVersion();
+    }
+
+    private static EditText bindField(View root, int id, String value) {
+        EditText field = root.findViewById(id);
+        field.setText(value);
+        return field;
+    }
+
+    private static String fieldText(EditText field) {
+        return field.getText().toString().trim();
     }
 
     private void wireAndroidVersionStepper() {
@@ -232,13 +360,125 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showTimezonePicker() {
-        View dialogView = LayoutInflater.from(this)
-                .inflate(R.layout.dialog_timezone_picker, null);
-        EditText search = dialogView.findViewById(R.id.timezone_search);
-        ListView list = dialogView.findViewById(R.id.timezone_list);
+        final List<String> ids = new ArrayList<>(Arrays.asList(TimeZone.getAvailableIDs()));
+        Collections.sort(ids, String.CASE_INSENSITIVE_ORDER);
+        String current = ConfigManager.getRawProperty(TIMEZONE_PROPERTY);
 
-        final List<String> all = new ArrayList<>(Arrays.asList(TimeZone.getAvailableIDs()));
-        Collections.sort(all, String.CASE_INSENSITIVE_ORDER);
+        showSearchPicker(R.string.timezone_dialog_title, ids, ids.indexOf(current), index -> {
+            Map<String, String> updates = new HashMap<>();
+            updates.put(TIMEZONE_PROPERTY, ids.get(index));
+            ConfigManager.setProperties(updates);
+            schedulePersist();
+            renderTimezoneValue();
+        });
+    }
+
+    private static final String LOCALE_SEEDED_FLAG = "_locale_seeded";
+    private static final String LEGACY_DEFAULT_LANGUAGE = "en";
+    private static final String LEGACY_DEFAULT_COUNTRY = "US";
+
+    private void populateLocaleIfMissing() {
+        String language = ConfigManager.getRawProperty(LOCALE_LANGUAGE_PROPERTY);
+        String country = ConfigManager.getRawProperty(LOCALE_COUNTRY_PROPERTY);
+        String seeded = ConfigManager.getRawProperty(LOCALE_SEEDED_FLAG);
+        boolean isEmpty = language.isEmpty();
+        boolean isLegacyDefaultUnseeded = !"1".equals(seeded)
+                && LEGACY_DEFAULT_LANGUAGE.equals(language)
+                && LEGACY_DEFAULT_COUNTRY.equals(country);
+        // LocaleHooks skips the module's own process, so this is the real locale.
+        Locale real = Locale.getDefault();
+        if ((isEmpty || isLegacyDefaultUnseeded) && !real.getLanguage().isEmpty()) {
+            Map<String, String> updates = localeUpdates(real);
+            updates.put(LOCALE_SEEDED_FLAG, "1");
+            ConfigManager.setProperties(updates);
+            schedulePersist();
+        }
+    }
+
+    private void wireLanguagePicker() {
+        View card = findViewById(R.id.language_card);
+        languageValue = findViewById(R.id.language_value);
+        renderLanguageValue();
+        card.setOnClickListener(v -> showLanguagePicker());
+    }
+
+    private void renderLanguageValue() {
+        if (languageValue == null) return;
+        String tag = currentLocaleTag();
+        languageValue.setText(tag.isEmpty() ? "—" : tag);
+    }
+
+    // Same tag WebViewHooks reports as navigator.language.
+    private static String currentLocaleTag() {
+        String language = ConfigManager.getRawProperty(LOCALE_LANGUAGE_PROPERTY);
+        String country = ConfigManager.getRawProperty(LOCALE_COUNTRY_PROPERTY);
+        return language.isEmpty() || country.isEmpty() ? language : language + "-" + country;
+    }
+
+    private void showLanguagePicker() {
+        // LocaleHooks applies language + country only, so script variants
+        // (zh-Hans-CN, sr-Latn-RS) fold into one entry per base locale.
+        final Map<String, Locale> byLabel = new HashMap<>();
+        for (Locale l : Locale.getAvailableLocales()) {
+            if (l.getLanguage().isEmpty() || l.getCountry().isEmpty()) continue;
+            Locale base = new Locale(l.getLanguage(), l.getCountry());
+            byLabel.put(base.getDisplayName(base) + " · " + base.toLanguageTag(), base);
+        }
+        final List<String> labels = new ArrayList<>(byLabel.keySet());
+        Collections.sort(labels, Collator.getInstance());
+
+        String current = currentLocaleTag();
+        int checkedIdx = -1;
+        for (int i = 0; i < labels.size(); i++) {
+            if (byLabel.get(labels.get(i)).toLanguageTag().equals(current)) {
+                checkedIdx = i;
+                break;
+            }
+        }
+
+        showSearchPicker(R.string.language_dialog_title, labels, checkedIdx, index -> {
+            ConfigManager.setProperties(localeUpdates(byLabel.get(labels.get(index))));
+            schedulePersist();
+            renderLanguageValue();
+        });
+    }
+
+    // Keeps language + country only (what LocaleHooks applies). The language
+    // subtag comes from the tag: getLanguage() can report legacy iw/in/ji.
+    private static Map<String, String> localeUpdates(Locale locale) {
+        String tag = new Locale(locale.getLanguage(), locale.getCountry()).toLanguageTag();
+        int dash = tag.indexOf('-');
+        Map<String, String> updates = new HashMap<>();
+        updates.put(LOCALE_LANGUAGE_PROPERTY, dash < 0 ? tag : tag.substring(0, dash));
+        updates.put(LOCALE_COUNTRY_PROPERTY, locale.getCountry());
+        updates.put(LOCALE_TAG_PROPERTY, tag);
+        return updates;
+    }
+
+    // A switch bound to a 0 / 1 config flag.
+    private void wireFlagSwitch(int switchId, String property, boolean checked) {
+        MaterialSwitch sw = findViewById(switchId);
+        sw.setChecked(checked);
+        sw.setOnCheckedChangeListener((btn, isChecked) -> {
+            Map<String, String> updates = new HashMap<>();
+            updates.put(property, isChecked ? "1" : "0");
+            ConfigManager.setProperties(updates);
+            schedulePersist();
+        });
+    }
+
+    // Searchable single-choice list. onPicked gets the index into labels, so
+    // labels must be unique.
+    private void showSearchPicker(int titleRes, List<String> labels, int checkedIdx,
+                                  IntConsumer onPicked) {
+        View dialogView = LayoutInflater.from(this)
+                .inflate(R.layout.dialog_search_picker, null);
+        EditText search = dialogView.findViewById(R.id.search);
+        ListView list = dialogView.findViewById(R.id.list);
+
+        final List<String> all = new ArrayList<>(labels);
+        final String checkedLabel = checkedIdx >= 0 && checkedIdx < all.size()
+                ? all.get(checkedIdx) : null;
 
         // ArrayAdapter's default filter is startsWith; override with contains.
         ArrayAdapter<String> adapter = new ArrayAdapter<String>(this,
@@ -254,9 +494,9 @@ public class MainActivity extends AppCompatActivity {
                     }
                     String needle = constraint.toString().toLowerCase(Locale.ROOT);
                     List<String> matches = new ArrayList<>();
-                    for (String tz : all) {
-                        if (tz.toLowerCase(Locale.ROOT).contains(needle)) {
-                            matches.add(tz);
+                    for (String label : all) {
+                        if (label.toLowerCase(Locale.ROOT).contains(needle)) {
+                            matches.add(label);
                         }
                     }
                     results.values = matches;
@@ -272,6 +512,10 @@ public class MainActivity extends AppCompatActivity {
                         addAll((List<String>) results.values);
                     }
                     notifyDataSetChanged();
+                    // The checked state is positional; keep it on the current value.
+                    list.clearChoices();
+                    int pos = checkedLabel == null ? -1 : getPosition(checkedLabel);
+                    if (pos >= 0) list.setItemChecked(pos, true);
                 }
             };
 
@@ -282,17 +526,13 @@ public class MainActivity extends AppCompatActivity {
         };
         list.setAdapter(adapter);
 
-        String currentTz = ConfigManager.getRawProperty(TIMEZONE_PROPERTY);
-        if (currentTz != null && !currentTz.isEmpty()) {
-            int idx = all.indexOf(currentTz);
-            if (idx >= 0) {
-                list.setItemChecked(idx, true);
-                list.setSelection(idx);
-            }
+        if (checkedLabel != null) {
+            list.setItemChecked(checkedIdx, true);
+            list.setSelection(checkedIdx);
         }
 
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle(R.string.timezone_dialog_title)
+                .setTitle(titleRes)
                 .setView(dialogView)
                 .setNegativeButton(R.string.dialog_cancel, null)
                 .create();
@@ -307,12 +547,9 @@ public class MainActivity extends AppCompatActivity {
 
         list.setOnItemClickListener((parent, view, position, id) -> {
             String chosen = adapter.getItem(position);
-            if (chosen != null) {
-                Map<String, String> updates = new HashMap<>();
-                updates.put(TIMEZONE_PROPERTY, chosen);
-                ConfigManager.setProperties(updates);
-                schedulePersist();
-                renderTimezoneValue();
+            int index = chosen == null ? -1 : all.indexOf(chosen);
+            if (index >= 0) {
+                onPicked.accept(index);
             }
             dialog.dismiss();
         });
@@ -533,6 +770,15 @@ public class MainActivity extends AppCompatActivity {
             dataDir.setExecutable(true, false);
         } catch (Throwable ignored) {
         }
+    }
+
+    // A config saved by 1.1 / 1.2 still carries that version's defaults. Runs
+    // once; a fresh install has nothing to move and only gets the flag.
+    private void migrateLegacyDefaults() {
+        if ("1".equals(ConfigManager.getRawProperty(DEFAULTS_MIGRATED_FLAG))) return;
+        Map<String, String> updates = ConfigManager.getLegacyDefaultUpdates();
+        updates.put(DEFAULTS_MIGRATED_FLAG, "1");
+        ConfigManager.setProperties(updates);
     }
 
     private void populateMissingValues() {

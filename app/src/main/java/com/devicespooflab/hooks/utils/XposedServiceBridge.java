@@ -59,7 +59,6 @@ public final class XposedServiceBridge {
         ClassLoader appLoader = appContext != null ? appContext.getClassLoader()
                 : resolveAppClassLoader();
         if (appLoader == null) {
-            Log.i(TAG, "XposedServiceBridge.init: app classloader not ready yet");
             return;
         }
 
@@ -93,7 +92,8 @@ public final class XposedServiceBridge {
             helperCls.getMethod("registerListener", listenerCls).invoke(null, listener);
             sInitialized = true;
         } catch (ClassNotFoundException cnf) {
-            Log.i(TAG, "XposedServiceHelper not on APP classloader: " + cnf.getMessage());
+            // Expected in every target app: only the module's own APK carries
+            // the service library.
             sInitialized = true;
         } catch (Throwable t) {
             Log.w(TAG, "XposedServiceBridge.init failed: "

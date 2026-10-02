@@ -53,10 +53,10 @@ public final class XposedModuleImpl extends XposedModule {
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
-        Log.i(TAG, "XposedModuleImpl onModuleLoaded process=" + param.getProcessName()
-                + " systemServer=" + param.isSystemServer());
         // Read-only RemotePreferences is live now; writes wait for the
         // IXposedService binder from MainHook's Application.attach hook.
+        // Nothing is logged here: this runs inside the hooked app, and the
+        // verbose flag isn't known before the config is loaded.
         XposedServiceBridge.markAvailableViaNewApi();
     }
 

@@ -2,8 +2,8 @@ package com.devicespooflab.hooks.hooks;
 
 import com.devicespooflab.hooks.utils.ConfigManager;
 
-import java.util.HashSet;
-import java.util.Set;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -29,6 +29,7 @@ public class BuildHooks {
             hookBuildGetLong(buildClass);
             hookPartitionMethods(lpparam.classLoader);
             spoofVersionFields(lpparam.classLoader);
+            spoofHttpAgent();
 
             if (ConfigManager.isVerboseLoggingEnabled()) {
                 XposedBridge.log(TAG + ": Successfully spoofed Build static fields and methods");
@@ -49,6 +50,7 @@ public class BuildHooks {
 
             spoofBuildFields(buildClass);
             spoofVersionFields(classLoader);
+            spoofHttpAgent();
 
             if (ConfigManager.isVerboseLoggingEnabled()) {
                 XposedBridge.log(TAG + ": Refreshed Build static fields");
@@ -70,8 +72,6 @@ public class BuildHooks {
         setStringField(buildClass, "BOARD", ConfigManager.getBuildBoard());
         setStringField(buildClass, "BOOTLOADER", ConfigManager.getBuildBootloader());
         setStringField(buildClass, "BRAND", ConfigManager.getBuildBrand());
-        setStringField(buildClass, "CPU_ABI", firstAbi(prop("ro.product.cpu.abi", "arm64-v8a")));
-        setStringField(buildClass, "CPU_ABI2", secondAbi(prop("ro.product.cpu.abilist", "arm64-v8a,armeabi-v7a,armeabi")));
         setStringField(buildClass, "DEVICE", ConfigManager.getBuildDevice());
         setStringField(buildClass, "DISPLAY", ConfigManager.getBuildDisplay());
         setStringField(buildClass, "FINGERPRINT", ConfigManager.getBuildFingerprint());
@@ -80,22 +80,29 @@ public class BuildHooks {
         setStringField(buildClass, "ID", ConfigManager.getBuildId());
         setStringField(buildClass, "MANUFACTURER", ConfigManager.getBuildManufacturer());
         setStringField(buildClass, "MODEL", ConfigManager.getBuildModel());
-        setStringField(buildClass, "ODM_SKU", prop("ro.boot.product.hardware.sku", ""));
+        setStringField(buildClass, "ODM_SKU", prop("ro.boot.product.hardware.sku", "unknown"));
         setStringField(buildClass, "PRODUCT", ConfigManager.getBuildProduct());
-        setStringField(buildClass, "RADIO", getRadioVersion());
+        // Read before the modem reports its version, so "unknown" on a normal
+        // boot; getRadioVersion() is the live value.
+        setStringField(buildClass, "RADIO", "unknown");
         setStringField(buildClass, "SERIAL", ConfigManager.getSerial());
-        setStringField(buildClass, "SKU", prop("ro.boot.hardware.sku", ""));
+        setStringField(buildClass, "SKU", prop("ro.boot.hardware.sku", "unknown"));
         setStringField(buildClass, "SOC_MANUFACTURER", prop("ro.soc.manufacturer", ConfigManager.getBuildManufacturer()));
         setStringField(buildClass, "SOC_MODEL", prop("ro.soc.model", "gs201"));
+        // Android 17. Without a chip in the profile they read like a device
+        // that declares none.
+        setStringField(buildClass, "STRONGBOX_MANUFACTURER", prop("ro.strongbox.manufacturer", "unsupported"));
+        setStringField(buildClass, "STRONGBOX_MODEL", prop("ro.strongbox.model", "unsupported"));
         setStringField(buildClass, "TAGS", ConfigManager.getBuildTags());
-        setLongField(buildClass, "TIME", getBuildTimeMillis());
+        long buildTime = getBuildTimeMillis("ro.build.date.utc");
+        if (buildTime > 0) {
+            setLongField(buildClass, "TIME", buildTime);
+        }
         setStringField(buildClass, "TYPE", ConfigManager.getBuildType());
         setStringField(buildClass, "UNKNOWN", "unknown");
         setStringField(buildClass, "USER", prop("ro.build.user", "android-build"));
 
-        setStringArrayField(buildClass, "SUPPORTED_ABIS", splitCsv(prop("ro.product.cpu.abilist", "arm64-v8a,armeabi-v7a,armeabi")));
-        setStringArrayField(buildClass, "SUPPORTED_64_BIT_ABIS", splitCsv(prop("ro.product.cpu.abilist64", "arm64-v8a")));
-        setStringArrayField(buildClass, "SUPPORTED_32_BIT_ABIS", splitCsv(prop("ro.product.cpu.abilist32", "armeabi-v7a,armeabi")));
+        spoofAbiFields(buildClass);
 
         String buildType = ConfigManager.getBuildType();
         setBooleanField(buildClass, "IS_DEBUGGABLE", propBoolean("ro.debuggable", false));
@@ -121,8 +128,6 @@ public class BuildHooks {
         setStringField(versionClass, "BASE_OS", prop("ro.build.version.base_os", ""));
         setStringField(versionClass, "CODENAME", ConfigManager.getBuildVersionCodename());
         setStringField(versionClass, "INCREMENTAL", ConfigManager.getBuildVersionIncremental());
-        setIntField(versionClass, "MEDIA_PERFORMANCE_CLASS", propInt("ro.odm.build.media_performance_class", 0));
-        setIntField(versionClass, "MIN_SUPPORTED_TARGET_SDK_INT", propInt("ro.build.version.min_supported_target_sdk", 26));
         setIntField(versionClass, "PREVIEW_SDK_INT", previewSdk);
         setStringField(versionClass, "PREVIEW_SDK_FINGERPRINT", prop("ro.build.version.preview_sdk_fingerprint", "REL"));
         setStringField(versionClass, "RELEASE", ConfigManager.getBuildVersionRelease());
@@ -137,12 +142,101 @@ public class BuildHooks {
         setIntField(versionClass, "RESOURCES_SDK_INT", previewSdk > 0 ? sdk + 1 : sdk);
         setStringField(versionClass, "SDK", String.valueOf(sdk));
         setIntField(versionClass, "SDK_INT", sdk);
+        // Android 16+: SDK_INT * 100000 + the minor version ("36.1" -> 3600001).
+        setIntField(versionClass, "SDK_INT_FULL", sdkIntFull(sdk));
+        setIntField(versionClass, "RESOURCES_SDK_INT_FULL",
+                sdkIntFull(sdk) + (previewSdk > 0 ? 100000 : 0));
         setStringField(versionClass, "SECURITY_PATCH", ConfigManager.getBuildVersionSecurityPatch());
         setStringArrayField(versionClass, "ACTIVE_CODENAMES", new String[0]);
+        // MEDIA_PERFORMANCE_CLASS, KNOWN_CODENAMES and MIN_SUPPORTED_TARGET_SDK_INT
+        // stay the phone's own: the first steers what apps ask of the real
+        // hardware, the other two belong to the platform the app runs on.
+    }
 
-        Set<String> knownCodenames = new HashSet<>();
-        knownCodenames.add(ConfigManager.getBuildVersionCodename());
-        setObjectField(versionClass, "KNOWN_CODENAMES", knownCodenames);
+    // SUPPORTED_ABIS and the CPU_ABI pair, the way Build derives them: CPU_ABI /
+    // CPU_ABI2 are the first two ABIs of the process's own bitness. Left alone
+    // when the profile has no ABI of that bitness (see isAbiSpoofSuppressed).
+    private static void spoofAbiFields(Class<?> buildClass) {
+        if (ConfigManager.isAbiSpoofSuppressed()) {
+            return;
+        }
+        String[] abis = splitCsv(prop("ro.product.cpu.abilist", ""));
+        if (abis.length == 0) {
+            return;
+        }
+        String[] abis64 = splitCsv(prop("ro.product.cpu.abilist64", ""));
+        String[] abis32 = splitCsv(prop("ro.product.cpu.abilist32", ""));
+        setStringArrayField(buildClass, "SUPPORTED_ABIS", abis);
+        setStringArrayField(buildClass, "SUPPORTED_64_BIT_ABIS", abis64);
+        setStringArrayField(buildClass, "SUPPORTED_32_BIT_ABIS", abis32);
+
+        String[] own = android.os.Process.is64Bit() ? abis64 : abis32;
+        if (own.length > 0) {
+            setStringField(buildClass, "CPU_ABI", own[0]);
+            setStringField(buildClass, "CPU_ABI2", own.length > 1 ? own[1] : "");
+        }
+    }
+
+    private static int sdkIntFull(int sdk) {
+        String full = prop("ro.build.version.sdk_full", "");
+        int dot = full.indexOf('.');
+        try {
+            int major = Integer.parseInt(dot < 0 ? full : full.substring(0, dot));
+            int minor = dot < 0 ? 0 : Integer.parseInt(full.substring(dot + 1));
+            if (major == sdk && minor >= 0 && minor < 100000) {
+                return major * 100000 + minor;
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        return sdk * 100000;
+    }
+
+    private static volatile String sRealHttpAgent;
+    private static volatile String sSpoofedHttpAgent;
+
+    // "Dalvik/2.1.0 (Linux; U; Android 16; Pixel 7 Pro Build/BP4A.251205.006)"
+    private static final java.util.regex.Pattern HTTP_AGENT = java.util.regex.Pattern.compile(
+            "(Dalvik/\\S+ \\(Linux; U; Android )[^;)]*?(?:; (.*?))?( Build/[^)]*)?\\)");
+
+    // The runtime builds http.agent from the real Build before any module code
+    // runs, and HttpURLConnection sends it as its default User-Agent. Rebuilt
+    // here the way RuntimeInit does it. An agent the app set itself is kept.
+    private static void spoofHttpAgent() {
+        try {
+            String current = System.getProperty("http.agent");
+            if (current == null) return;
+            String real = sRealHttpAgent;
+            if (real == null) {
+                real = current;
+            } else if (!current.equals(sSpoofedHttpAgent) && !current.equals(real)) {
+                return;
+            }
+            java.util.regex.Matcher m = HTTP_AGENT.matcher(real);
+            if (!m.matches()) return;
+
+            String release = ConfigManager.getBuildVersionRelease();
+            String model = ConfigManager.getBuildModel();
+            String buildId = ConfigManager.getBuildId();
+            StringBuilder agent = new StringBuilder(m.group(1));
+            agent.append(release == null || release.isEmpty() ? "1.0" : release);
+            if (model != null && !model.isEmpty()) {
+                agent.append("; ").append(model);
+            } else if (m.group(2) != null) {
+                agent.append("; ").append(m.group(2));
+            }
+            if (buildId != null && !buildId.isEmpty()) {
+                agent.append(" Build/").append(buildId);
+            } else if (m.group(3) != null) {
+                agent.append(m.group(3));
+            }
+            agent.append(')');
+
+            sRealHttpAgent = real;
+            sSpoofedHttpAgent = agent.toString();
+            System.setProperty("http.agent", sSpoofedHttpAgent);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": Failed to set http.agent: " + t.getMessage());
+        }
     }
 
     private static void hookGetSerial(Class<?> buildClass) {
@@ -168,7 +262,13 @@ public class BuildHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            param.setResult(getRadioVersion());
+                            // Never null. The platform returns null for an unset
+                            // baseband, but a phone always has one, so apps
+                            // don't check for it.
+                            String radio = ConfigManager.getSystemProperty("gsm.version.baseband", null);
+                            if (radio != null) {
+                                param.setResult(radio.isEmpty() ? "unknown" : radio);
+                            }
                         }
                     });
         } catch (NoSuchMethodError ignored) {
@@ -187,7 +287,8 @@ public class BuildHooks {
                             String key = (String) param.args[0];
                             String spoofedValue = ConfigManager.getSystemProperty(key, null);
                             if (spoofedValue != null) {
-                                param.setResult(spoofedValue);
+                                // Build reads an unset property as "unknown".
+                                param.setResult(spoofedValue.isEmpty() ? "unknown" : spoofedValue);
                             }
                         }
                     });
@@ -253,7 +354,12 @@ public class BuildHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            param.setResult(getBuildTimeMillis());
+                            String partitionName = getPartitionName(param.thisObject);
+                            long time = getBuildTimeMillis(partitionName == null || partitionName.isEmpty()
+                                    ? "ro.build.date.utc" : "ro." + partitionName + ".build.date.utc");
+                            if (time > 0) {
+                                param.setResult(time);
+                            }
                         }
                     });
         } catch (NoSuchMethodError ignored) {
@@ -284,65 +390,87 @@ public class BuildHooks {
         if (value == null) {
             return;
         }
-
-        try {
-            XposedHelpers.setStaticObjectField(clazz, fieldName, value);
-        } catch (NoSuchFieldError ignored) {
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to set " + clazz.getName() + "." + fieldName + ": " + t.getMessage());
-        }
+        setStaticField(clazz, fieldName, value);
     }
 
     private static void setStringArrayField(Class<?> clazz, String fieldName, String[] value) {
         if (value == null) {
             return;
         }
-
-        try {
-            XposedHelpers.setStaticObjectField(clazz, fieldName, value);
-        } catch (NoSuchFieldError ignored) {
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to set " + clazz.getName() + "." + fieldName + ": " + t.getMessage());
-        }
+        setStaticField(clazz, fieldName, value);
     }
 
     private static void setIntField(Class<?> clazz, String fieldName, int value) {
-        try {
-            XposedHelpers.setStaticIntField(clazz, fieldName, value);
-        } catch (NoSuchFieldError ignored) {
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to set " + clazz.getName() + "." + fieldName + ": " + t.getMessage());
-        }
+        setStaticField(clazz, fieldName, value);
     }
 
     private static void setBooleanField(Class<?> clazz, String fieldName, boolean value) {
-        try {
-            XposedHelpers.setStaticBooleanField(clazz, fieldName, value);
-        } catch (NoSuchFieldError ignored) {
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to set " + clazz.getName() + "." + fieldName + ": " + t.getMessage());
-        }
+        setStaticField(clazz, fieldName, value);
     }
 
     private static void setLongField(Class<?> clazz, String fieldName, long value) {
+        setStaticField(clazz, fieldName, value);
+    }
+
+    // Plain reflection, not XposedHelpers.setStatic*Field: those log a stack
+    // trace and rethrow as IllegalAccessError, which hides the case below.
+    private static void setStaticField(Class<?> clazz, String fieldName, Object value) {
         try {
-            XposedHelpers.setStaticLongField(clazz, fieldName, value);
+            Field field = XposedHelpers.findField(clazz, fieldName);
+            try {
+                field.set(null, value);
+            } catch (IllegalAccessException e) {
+                putStaticWithUnsafe(field, value);
+            }
         } catch (NoSuchFieldError ignored) {
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": Failed to set " + clazz.getName() + "." + fieldName + ": " + t.getMessage());
         }
     }
 
-    private static void setObjectField(Class<?> clazz, String fieldName, Object value) {
-        if (value == null) {
-            return;
+    private static volatile Object sUnsafe;
+    private static volatile Method sFieldGetOffset;
+    private static volatile boolean sUnsafeLogged;
+
+    // Android 17 refuses reflective writes to static final fields in apps that
+    // target API 37+ (IllegalAccessException); Unsafe writes are not checked.
+    // ART stores static fields inside the Class object, at the offset returned
+    // by the hidden Field.getOffset(). That method and theUnsafe are on the
+    // unsupported (allowed) non-SDK list; the private Field.offset is not.
+    private static void putStaticWithUnsafe(Field field, Object value) throws Throwable {
+        if (sUnsafe == null) {
+            Field theUnsafe = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            sFieldGetOffset = Field.class.getMethod("getOffset");
+            sUnsafe = theUnsafe.get(null);
         }
 
-        try {
-            XposedHelpers.setStaticObjectField(clazz, fieldName, value);
-        } catch (NoSuchFieldError ignored) {
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to set " + clazz.getName() + "." + fieldName + ": " + t.getMessage());
+        Class<?> type = field.getType();
+        String writer;
+        Class<?> valueType;
+        if (type == int.class) {
+            writer = "putInt";
+            valueType = int.class;
+        } else if (type == long.class) {
+            writer = "putLong";
+            valueType = long.class;
+        } else if (type == boolean.class) {
+            writer = "putBoolean";
+            valueType = boolean.class;
+        } else if (!type.isPrimitive() && type.isInstance(value)) {
+            // Unsafe skips the type check reflection would have done.
+            writer = "putObject";
+            valueType = Object.class;
+        } else {
+            throw new IllegalArgumentException("no Unsafe write for " + type.getName());
+        }
+
+        long offset = (Integer) sFieldGetOffset.invoke(field);
+        sUnsafe.getClass().getMethod(writer, Object.class, long.class, valueType)
+                .invoke(sUnsafe, field.getDeclaringClass(), offset, value);
+        if (!sUnsafeLogged && ConfigManager.isVerboseLoggingEnabled()) {
+            sUnsafeLogged = true;
+            XposedBridge.log(TAG + ": static final writes blocked (target SDK 37+), using Unsafe");
         }
     }
 
@@ -374,23 +502,10 @@ public class BuildHooks {
         }
     }
 
-    private static long getBuildTimeMillis() {
-        long seconds = propLong("ro.build.date.utc", 1733356800L);
-        return seconds > 100000000000L ? seconds : seconds * 1000L;
-    }
-
-    private static String getRadioVersion() {
-        return prop("gsm.version.baseband", "unknown");
-    }
-
-    private static String firstAbi(String value) {
-        String[] values = splitCsv(value);
-        return values.length > 0 ? values[0] : "";
-    }
-
-    private static String secondAbi(String value) {
-        String[] values = splitCsv(value);
-        return values.length > 1 ? values[1] : "";
+    // Build time behind a ro.[<partition>.]build.date.utc key; -1 = no opinion.
+    private static long getBuildTimeMillis(String key) {
+        long seconds = propLong(key, -1L);
+        return seconds > 0 ? seconds * 1000L : -1L;
     }
 
     private static String[] splitCsv(String value) {

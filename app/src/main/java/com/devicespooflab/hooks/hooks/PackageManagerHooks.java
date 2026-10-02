@@ -1,5 +1,7 @@
 package com.devicespooflab.hooks.hooks;
 
+import android.content.pm.FeatureInfo;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -15,48 +17,27 @@ public class PackageManagerHooks {
 
     private static final String TAG = "DeviceSpoofLab-PackageManager";
 
-    private static final Set<String> PIXEL_7_PRO_FEATURES = new HashSet<>(Arrays.asList(
+    // What every phone has, whatever its maker: reported as present even where
+    // the host lacks it (an emulator, a tablet). Hardware that differs from
+    // phone to phone (NFC, fingerprint, gyroscope, barometer, Vulkan levels,
+    // ...) is not listed: the real answer stays, since an app that is told a
+    // feature exists goes on to use it.
+    private static final Set<String> BASELINE_FEATURES = new HashSet<>(Arrays.asList(
         "android.hardware.camera",
+        "android.hardware.camera.any",
         "android.hardware.camera.autofocus",
         "android.hardware.camera.flash",
         "android.hardware.camera.front",
-        "android.hardware.camera.any",
-        "android.hardware.camera.ar",
-        "android.hardware.camera.capability.manual_post_processing",
-        "android.hardware.camera.capability.manual_sensor",
-        "android.hardware.camera.capability.raw",
 
-        // Sensors (real device sensors)
         "android.hardware.sensor.accelerometer",
-        "android.hardware.sensor.gyroscope",
-        "android.hardware.sensor.compass",
-        "android.hardware.sensor.barometer",
-        "android.hardware.sensor.light",
-        "android.hardware.sensor.proximity",
-        "android.hardware.sensor.stepcounter",
-        "android.hardware.sensor.stepdetector",
 
-        // Connectivity
         "android.hardware.telephony",
         "android.hardware.telephony.gsm",
-        "android.hardware.telephony.cdma",
-        "android.hardware.telephony.ims",
         "android.hardware.wifi",
         "android.hardware.wifi.direct",
-        "android.hardware.wifi.aware",
         "android.hardware.bluetooth",
         "android.hardware.bluetooth_le",
-        "android.hardware.nfc",
-        "android.hardware.nfc.hce",
-        "android.hardware.nfc.hcef",
-        "android.hardware.nfc.ese",
-        "android.hardware.nfc.uicc",
 
-        // Biometrics
-        "android.hardware.fingerprint",
-        "android.hardware.biometrics.face",
-
-        // Display
         "android.hardware.touchscreen",
         "android.hardware.touchscreen.multitouch",
         "android.hardware.touchscreen.multitouch.distinct",
@@ -64,39 +45,23 @@ public class PackageManagerHooks {
         "android.hardware.screen.portrait",
         "android.hardware.screen.landscape",
 
-        // Location
         "android.hardware.location",
         "android.hardware.location.gps",
         "android.hardware.location.network",
 
-        // Audio
         "android.hardware.audio.output",
-        "android.hardware.audio.low_latency",
-        "android.hardware.audio.pro",
         "android.hardware.microphone",
 
-        // USB
         "android.hardware.usb.host",
         "android.hardware.usb.accessory",
 
-        // Vulkan
-        "android.hardware.vulkan.level",
-        "android.hardware.vulkan.version",
-        "android.hardware.vulkan.compute",
-
-        // OpenGL ES
-        "android.hardware.opengles.aep",
-
-        // Software features
         "android.software.device_admin",
         "android.software.managed_users",
         "android.software.webview",
         "android.software.backup",
         "android.software.app_widgets",
-        "android.software.voice_recognizers",
         "android.software.home_screen",
         "android.software.input_methods",
-        "android.software.connectionservice",
         "android.software.autofill",
         "android.software.verified_boot",
         "android.software.secure_lock_screen"
@@ -121,6 +86,16 @@ public class PackageManagerHooks {
         }
     }
 
+    private static boolean isDenied(String feature) {
+        String lower = feature.toLowerCase();
+        for (String denied : DENIED_FEATURES) {
+            if (lower.contains(denied)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void hookHasSystemFeature(Class<?> pmClass) {
         try {
             XposedHelpers.findAndHookMethod(pmClass, "hasSystemFeature",
@@ -134,14 +109,12 @@ public class PackageManagerHooks {
                             return;
                         }
 
-                        for (String denied : DENIED_FEATURES) {
-                            if (feature.toLowerCase().contains(denied.toLowerCase())) {
-                                param.setResult(false);
-                                return;
-                            }
+                        if (isDenied(feature)) {
+                            param.setResult(false);
+                            return;
                         }
 
-                        if (PIXEL_7_PRO_FEATURES.contains(feature)) {
+                        if (BASELINE_FEATURES.contains(feature)) {
                             param.setResult(true);
                         }
                     }
@@ -162,14 +135,14 @@ public class PackageManagerHooks {
                             return;
                         }
 
-                        for (String denied : DENIED_FEATURES) {
-                            if (feature.toLowerCase().contains(denied.toLowerCase())) {
-                                param.setResult(false);
-                                return;
-                            }
+                        if (isDenied(feature)) {
+                            param.setResult(false);
+                            return;
                         }
 
-                        if (PIXEL_7_PRO_FEATURES.contains(feature)) {
+                        // A baseline feature is listed as version 0, so it only
+                        // answers a query for that.
+                        if ((int) param.args[1] <= 0 && BASELINE_FEATURES.contains(feature)) {
                             param.setResult(true);
                         }
                     }
@@ -179,48 +152,43 @@ public class PackageManagerHooks {
         }
     }
 
+    // Same answer as hasSystemFeature: denied entries dropped, baseline
+    // features the host lacks added.
     private static void hookGetSystemAvailableFeatures(Class<?> pmClass) {
         try {
             XposedHelpers.findAndHookMethod(pmClass, "getSystemAvailableFeatures",
                 new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        Object[] features = (Object[]) param.getResult();
-                        if (features == null) {
+                        Object result = param.getResult();
+                        if (!(result instanceof FeatureInfo[])) {
                             return;
                         }
+                        FeatureInfo[] features = (FeatureInfo[]) result;
 
-                        Class<?> featureInfoClass = features.getClass().getComponentType();
-
-                        List<Object> filtered = new ArrayList<>();
-                        for (Object feature : features) {
-                            try {
-                                String name = (String) XposedHelpers.getObjectField(feature, "name");
-                                if (name != null) {
-                                    boolean isDenied = false;
-                                    for (String denied : DENIED_FEATURES) {
-                                        if (name.toLowerCase().contains(denied.toLowerCase())) {
-                                            isDenied = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!isDenied) {
-                                        filtered.add(feature);
-                                    }
-                                } else {
-                                    filtered.add(feature);
-                                }
-                            } catch (Exception e) {
-                                filtered.add(feature);
+                        List<FeatureInfo> listed = new ArrayList<>(features.length);
+                        Set<String> missing = new HashSet<>(BASELINE_FEATURES);
+                        boolean changed = false;
+                        for (FeatureInfo feature : features) {
+                            String name = feature == null ? null : feature.name;
+                            if (name != null && isDenied(name)) {
+                                changed = true;
+                                continue;
                             }
+                            if (name != null) {
+                                missing.remove(name);
+                            }
+                            listed.add(feature);
                         }
-
-                        Object typedArray = java.lang.reflect.Array.newInstance(
-                            featureInfoClass, filtered.size());
-                        for (int i = 0; i < filtered.size(); i++) {
-                            java.lang.reflect.Array.set(typedArray, i, filtered.get(i));
+                        for (String name : missing) {
+                            FeatureInfo added = new FeatureInfo();
+                            added.name = name;
+                            listed.add(added);
+                            changed = true;
                         }
-                        param.setResult(typedArray);
+                        if (changed) {
+                            param.setResult(listed.toArray(new FeatureInfo[0]));
+                        }
                     }
                 });
         } catch (Exception e) {

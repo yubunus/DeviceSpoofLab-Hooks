@@ -1,0 +1,3 @@
+[submodule "app/src/main/cpp/external/lsplt"]
+	path = app/src/main/cpp/external/lsplt
+	url = https://github.com/LSPosed/LSPlt.git

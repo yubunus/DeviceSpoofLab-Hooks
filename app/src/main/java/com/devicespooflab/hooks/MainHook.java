@@ -13,6 +13,7 @@ import com.devicespooflab.hooks.hooks.DisplayHooks;
 import com.devicespooflab.hooks.hooks.EuiccHooks;
 import com.devicespooflab.hooks.hooks.HardwareHooks;
 import com.devicespooflab.hooks.hooks.InputDeviceHooks;
+import com.devicespooflab.hooks.hooks.KernelHooks;
 import com.devicespooflab.hooks.hooks.LocaleHooks;
 import com.devicespooflab.hooks.hooks.MediaDrmHooks;
 import com.devicespooflab.hooks.hooks.NetworkHooks;
@@ -27,6 +28,9 @@ import com.devicespooflab.hooks.hooks.WebViewHooks;
 import com.devicespooflab.hooks.utils.ConfigManager;
 import com.devicespooflab.hooks.utils.XposedServiceBridge;
 
+import java.util.HashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -36,6 +40,15 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class MainHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "DeviceSpoofLab";
+
+    // handleLoadPackage runs for every package loaded into the process: the
+    // app itself, then GMS dynamite modules, the WebView and so on. The
+    // framework hooks are process-wide, so only the first call installs them.
+    private static final AtomicBoolean sProcessHooked = new AtomicBoolean(false);
+    private static final AtomicBoolean sDisplayHooked = new AtomicBoolean(false);
+    private static final AtomicBoolean sAccountsHooked = new AtomicBoolean(false);
+    // Build.VERSION.SDK_INT before BuildHooks replaces it.
+    private static volatile int sRealDeviceSdk;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -47,13 +60,16 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
 
-        boolean verbose = ConfigManager.isVerboseLoggingEnabled();
-        Log.i(TAG, "handleLoadPackage start pkg=" + lpparam.packageName
-                + " verbose=" + verbose
-                + " imei=" + ConfigManager.getIdentifierValue("imei")
-                + " gaid=" + ConfigManager.getIdentifierValue("gaid"));
-        logInfo(verbose, TAG + ": Loading hooks for " + lpparam.packageName);
-        final int realDeviceSdk = Build.VERSION.SDK_INT;
+        if (sRealDeviceSdk == 0) {
+            sRealDeviceSdk = Build.VERSION.SDK_INT;
+            ConfigManager.setRealSdkIntFull(readSdkIntFull());
+        }
+        final int realDeviceSdk = sRealDeviceSdk;
+
+        if (!sProcessHooked.compareAndSet(false, true)) {
+            hookLoadedPackage(lpparam, realDeviceSdk);
+            return;
+        }
 
         // XposedServiceHelper has independent static state in the app loader vs
         // the module loader. Defer init until Application.attach so the bridge
@@ -61,6 +77,20 @@ public class MainHook implements IXposedHookLoadPackage {
         // XposedProvider notifies on SEND_BINDER.
         final boolean isOwnPackage = ConfigManager.isOwnPackageProcess(lpparam.processName)
                 || "com.devicespooflab.hooks".equals(lpparam.packageName);
+
+        // Under the modern entry RemotePreferences is readable as soon as the
+        // module is loaded. Pulling the saved config now puts it in place
+        // before any app code runs; otherwise Application static init and
+        // attachBaseContext would still see the embedded default profile.
+        if (!isOwnPackage && XposedServiceBridge.isServiceAvailable()) {
+            ConfigManager.loadFromRemotePreferences();
+        }
+
+        // Nothing is logged in a hooked process unless verbose is on, and never
+        // an identifier value: an app can read its own log lines.
+        boolean verbose = ConfigManager.isVerboseLoggingEnabled();
+        logInfo(verbose, TAG + ": Loading hooks for " + lpparam.packageName
+                + " (config from " + ConfigManager.getLoadSource() + ")");
 
         final Runnable onBinderReady = new Runnable() {
             @Override
@@ -76,15 +106,14 @@ public class MainHook implements IXposedHookLoadPackage {
                 } else {
                     boolean loaded = ConfigManager.loadFromRemotePreferences();
                     if (loaded) {
-                        BuildHooks.refreshStaticFields(lpparam.classLoader);
+                        applyLoadedConfig(lpparam);
                     }
                     // Vector's read-only RemotePreferences caches a frozen
                     // snapshot at construction and never fires the change
                     // listener for daemon writes, so we poll _generation.
-                    installRemoteRefreshLoop(lpparam.classLoader);
-                    Log.i(TAG, "RemotePreferences load=" + loaded
-                            + " imei=" + ConfigManager.getIdentifierValue("imei")
-                            + " gaid=" + ConfigManager.getIdentifierValue("gaid"));
+                    installRemoteRefreshLoop(lpparam);
+                    logInfo(ConfigManager.isVerboseLoggingEnabled(),
+                            TAG + ": RemotePreferences load=" + loaded);
                 }
             }
         };
@@ -109,12 +138,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                         && ConfigManager.getIdentifierValue("imei").isEmpty()
                                         && XposedServiceBridge.isServiceAvailable()) {
                                     if (ConfigManager.loadFromRemotePreferences()) {
-                                        BuildHooks.refreshStaticFields(lpparam.classLoader);
+                                        applyLoadedConfig(lpparam);
                                     }
                                 }
-                                Log.i(TAG, "After Application.attach pkg=" + lpparam.packageName
-                                        + " imei=" + ConfigManager.getIdentifierValue("imei")
-                                        + " gaid=" + ConfigManager.getIdentifierValue("gaid"));
                             } catch (Throwable t) {
                                 Log.w(TAG, "Application.attach hook failed: "
                                         + t.getMessage());
@@ -212,17 +238,6 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": NetworkHooks failed: " + e.getMessage());
         }
 
-        if (!isOwnPackage) {
-            try {
-                DisplayHooks.hook(lpparam);
-                logInfo(verbose, TAG + ": DisplayHooks loaded");
-            } catch (Exception e) {
-                XposedBridge.log(TAG + ": DisplayHooks failed: " + e.getMessage());
-            }
-        } else {
-            logInfo(verbose, TAG + ": DisplayHooks skipped for module process");
-        }
-
         try {
             SensorHooks.hook(lpparam);
             logInfo(verbose, TAG + ": SensorHooks loaded");
@@ -251,19 +266,14 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Exception e) {
                 XposedBridge.log(TAG + ": LocaleHooks failed: " + e.getMessage());
             }
-        } else {
-            logInfo(verbose, TAG + ": LocaleHooks skipped for module process");
-        }
-
-        if (ConfigManager.isHideAccountsEnabled()) {
             try {
-                AccountHooks.hook(lpparam);
-                logInfo(verbose, TAG + ": AccountHooks loaded");
+                KernelHooks.hook(lpparam);
+                logInfo(verbose, TAG + ": KernelHooks loaded");
             } catch (Exception e) {
-                XposedBridge.log(TAG + ": AccountHooks failed: " + e.getMessage());
+                XposedBridge.log(TAG + ": KernelHooks failed: " + e.getMessage());
             }
         } else {
-            logInfo(verbose, TAG + ": AccountHooks skipped (hooks.hide_accounts=0)");
+            logInfo(verbose, TAG + ": LocaleHooks, KernelHooks skipped for module process");
         }
 
         try {
@@ -296,20 +306,97 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": InputDeviceHooks failed: " + e.getMessage());
         }
 
-        if (!isOwnPackage) {
-            try {
-                boolean ok = NativeHooks.tryInstall(ConfigManager.getAllSpoofedProperties());
-                logInfo(verbose, TAG + (ok
-                        ? ": NativeHooks loaded"
-                        : ": NativeHooks unavailable (Java-only spoofing active)"));
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + ": NativeHooks failed: " + t.getMessage());
-            }
-        } else {
-            logInfo(verbose, TAG + ": NativeHooks skipped for module process");
-        }
+        // DisplayHooks, AccountHooks and the native layer sit behind config
+        // flags. NativeHooks waits for applyLoadedConfig: a flag is only
+        // certain once RemotePreferences has answered.
+        installFlaggedHooks(lpparam, isOwnPackage);
 
         logInfo(verbose, TAG + ": All hooks initialized for " + lpparam.packageName);
+    }
+
+    // Build.VERSION.SDK_INT_FULL before BuildHooks replaces it. The field is
+    // new in Android 16; 0 where it doesn't exist.
+    private static int readSdkIntFull() {
+        try {
+            return Build.VERSION.class.getField("SDK_INT_FULL").getInt(null);
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    // A further package loaded into an already hooked process. Only the hooks
+    // on classes that package carries itself (its own copy of the GMS client
+    // library) are still to do.
+    private static void hookLoadedPackage(XC_LoadPackage.LoadPackageParam lpparam,
+                                          int realDeviceSdk) {
+        try {
+            AdvertisingIdHooks.hook(lpparam);
+            if (realDeviceSdk >= 30) {
+                AppSetIdHooks.hook(lpparam, realDeviceSdk);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": hooks for loaded package " + lpparam.packageName
+                    + " failed: " + t.getMessage());
+        }
+    }
+
+    // The saved config has just been loaded (at startup or again later):
+    // push it into everything that keeps a copy.
+    private static void applyLoadedConfig(XC_LoadPackage.LoadPackageParam lpparam) {
+        BuildHooks.refreshStaticFields(lpparam.classLoader);
+        LocaleHooks.applyDefaults();
+        KernelHooks.applyDefaults();
+        WebViewHooks.onConfigChanged();
+        installFlaggedHooks(lpparam, false);
+        maybeInstallNativeHooks(lpparam);
+    }
+
+    // Opt-in hooks. Their flags read as "off" until the saved config is in, so
+    // this runs after every load; each part installs at most once, and the
+    // hooks themselves keep checking the flag, so it can also be turned off.
+    private static void installFlaggedHooks(XC_LoadPackage.LoadPackageParam lpparam,
+                                            boolean isOwnPackage) {
+        if (isOwnPackage) {
+            return;
+        }
+        boolean verbose = ConfigManager.isVerboseLoggingEnabled();
+        if (ConfigManager.isDisplaySpoofEnabled() && sDisplayHooked.compareAndSet(false, true)) {
+            try {
+                DisplayHooks.hook(lpparam);
+                logInfo(verbose, TAG + ": DisplayHooks loaded");
+            } catch (Exception e) {
+                XposedBridge.log(TAG + ": DisplayHooks failed: " + e.getMessage());
+            }
+        }
+        if (ConfigManager.isHideAccountsEnabled() && sAccountsHooked.compareAndSet(false, true)) {
+            try {
+                AccountHooks.hook(lpparam);
+                logInfo(verbose, TAG + ": AccountHooks loaded");
+            } catch (Exception e) {
+                XposedBridge.log(TAG + ": AccountHooks failed: " + e.getMessage());
+            }
+        }
+    }
+
+    // Installs the native PLT hooks once the real config is available. The
+    // native layer targets an app's own bundled .so libraries, so it is opt-in
+    // (hooks.native_props) and never runs in the module's own process. Libraries
+    // loaded after this point are picked up by NativeHooks.rehook() on the
+    // refresh tick.
+    private static void maybeInstallNativeHooks(XC_LoadPackage.LoadPackageParam lpparam) {
+        if (!ConfigManager.isNativePropsEnabled()) {
+            return;
+        }
+        try {
+            HashMap<String, String> settings = ConfigManager.getNativeSettings();
+            // lpparam is the process's first package, the app itself. Only its
+            // libraries are hooked: the WebView and Play services code loaded
+            // into the process are other packages'.
+            settings.put("app.package", lpparam.packageName);
+            NativeHooks.tryInstall(ConfigManager.getAllSpoofedProperties(), settings);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": NativeHooks failed: " + t.getMessage());
+        }
     }
 
     private static void logInfo(boolean verbose, String message) {
@@ -319,12 +406,11 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private static final long REFRESH_INTERVAL_MS = 2_000L;
-    private static final java.util.concurrent.atomic.AtomicBoolean sRefreshInstalled =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final AtomicBoolean sRefreshInstalled = new AtomicBoolean(false);
     private static android.os.HandlerThread sRefreshThread;
     private static android.os.Handler sRefreshHandler;
 
-    private static void installRemoteRefreshLoop(final ClassLoader classLoader) {
+    private static void installRemoteRefreshLoop(final XC_LoadPackage.LoadPackageParam lpparam) {
         if (!sRefreshInstalled.compareAndSet(false, true)) return;
         try {
             sRefreshThread = new android.os.HandlerThread("spoof-refresh",
@@ -335,7 +421,13 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override
                 public void run() {
                     try {
-                        ConfigManager.refreshFromRemoteIfNewer(classLoader);
+                        if (ConfigManager.refreshFromRemoteIfNewer()) {
+                            applyLoadedConfig(lpparam);
+                        }
+                        // Pick up app-owned native libs loaded since install
+                        // (e.g. after System.loadLibrary). No-op unless the
+                        // native layer is installed.
+                        NativeHooks.rehook();
                     } catch (Throwable t) {
                         Log.w(TAG, "Remote refresh tick failed: " + t.getMessage());
                     } finally {
@@ -344,8 +436,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             };
             sRefreshHandler.postDelayed(tick, REFRESH_INTERVAL_MS);
-            Log.i(TAG, "Remote refresh loop installed (interval="
-                    + REFRESH_INTERVAL_MS + "ms)");
+            logInfo(ConfigManager.isVerboseLoggingEnabled(), TAG
+                    + ": Remote refresh loop installed (interval=" + REFRESH_INTERVAL_MS + "ms)");
         } catch (Throwable t) {
             sRefreshInstalled.set(false);
             Log.w(TAG, "installRemoteRefreshLoop failed: " + t.getMessage());

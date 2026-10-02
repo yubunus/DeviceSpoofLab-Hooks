@@ -19,11 +19,17 @@ public final class NativeHooks {
 
     private NativeHooks() {}
 
-    private static native int nativeInstall(HashMap<String, String> props);
+    private static native int nativeInstall(HashMap<String, String> props,
+                                            HashMap<String, String> settings);
+
+    private static native int nativeRehook();
 
     private static native String nativeQuery(String key);
 
-    public static synchronized boolean tryInstall(Map<String, String> props) {
+    // props: what a property read is answered with (an empty value reads as
+    // unset). settings: the native layer's own knobs, never served as properties.
+    public static synchronized boolean tryInstall(Map<String, String> props,
+                                                  Map<String, String> settings) {
         if (installed) {
             return true;
         }
@@ -31,10 +37,7 @@ public final class NativeHooks {
             return false;
         }
         try {
-            HashMap<String, String> hashMap = (props instanceof HashMap)
-                    ? (HashMap<String, String>) props
-                    : new HashMap<>(props);
-            int n = nativeInstall(hashMap);
+            int n = nativeInstall(new HashMap<>(props), new HashMap<>(settings));
             installed = (n >= 0);
             if (ConfigManager.isVerboseLoggingEnabled()) {
                 XposedBridge.log(TAG + ": nativeInstall returned " + n);
@@ -43,6 +46,24 @@ public final class NativeHooks {
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": nativeInstall threw: " + t);
             return false;
+        }
+    }
+
+    /**
+     * Re-scans loaded libraries and hooks any newly loaded app-owned one. An
+     * app's native libs are usually not mapped yet when {@link #tryInstall}
+     * runs, so this is re-driven from the config refresh loop (MainHook), off
+     * the app's threads. Hooking System.loadLibrary to get an exact signal is
+     * not viable: it breaks ART's caller-based lookup and the app then fails to
+     * load its own lib. A no-op until the library is installed.
+     */
+    public static void rehook() {
+        if (!installed) {
+            return;
+        }
+        try {
+            nativeRehook();
+        } catch (Throwable ignored) {
         }
     }
 

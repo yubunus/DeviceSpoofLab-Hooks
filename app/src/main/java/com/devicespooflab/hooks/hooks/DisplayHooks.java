@@ -15,17 +15,23 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class DisplayHooks {
 
     private static final String TAG = "DeviceSpoofLab-Display";
-    private static final float REFRESH_RATE_HZ = 120.0f;
 
+    // Opt-in (hooks.spoof_display). Resources.getDisplayMetrics is deliberately
+    // not hooked: it returns the app's shared metrics, and mutating their density
+    // rescales every layout in the process. The refresh rate isn't touched
+    // either: apps pace their frames by it.
     public static void hook(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             hookDisplayMethods();
-            hookResourcesGetDisplayMetrics();
             hookWindowMetrics(lpparam);
-            hookRefreshRate();
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": init failed: " + t);
         }
+    }
+
+    // Installed once the switch is on; turning it off again takes effect here.
+    private static boolean enabled() {
+        return ConfigManager.isDisplaySpoofEnabled();
     }
 
     private static void hookDisplayMethods() {
@@ -36,7 +42,7 @@ public class DisplayHooks {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             DisplayMetrics dm = (DisplayMetrics) param.args[0];
-                            applySpoofedMetrics(dm);
+                            if (enabled()) applySpoofedMetrics(dm);
                         }
                     });
         } catch (Throwable t) { logFail("Display.getRealMetrics", t); }
@@ -48,7 +54,7 @@ public class DisplayHooks {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             DisplayMetrics dm = (DisplayMetrics) param.args[0];
-                            applySpoofedMetrics(dm);
+                            if (enabled()) applySpoofedMetrics(dm);
                         }
                     });
         } catch (Throwable t) { logFail("Display.getMetrics", t); }
@@ -60,7 +66,7 @@ public class DisplayHooks {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             Point p = (Point) param.args[0];
-                            if (p != null) {
+                            if (p != null && enabled()) {
                                 p.x = ConfigManager.getScreenWidth();
                                 p.y = ConfigManager.getScreenHeight();
                             }
@@ -75,7 +81,7 @@ public class DisplayHooks {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             Point p = (Point) param.args[0];
-                            if (p != null) {
+                            if (p != null && enabled()) {
                                 p.x = ConfigManager.getScreenWidth();
                                 p.y = ConfigManager.getScreenHeight();
                             }
@@ -88,7 +94,7 @@ public class DisplayHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            param.setResult(ConfigManager.getScreenWidth());
+                            if (enabled()) param.setResult(ConfigManager.getScreenWidth());
                         }
                     });
         } catch (Throwable t) { /* deprecated method may be missing */ }
@@ -98,36 +104,10 @@ public class DisplayHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            param.setResult(ConfigManager.getScreenHeight());
+                            if (enabled()) param.setResult(ConfigManager.getScreenHeight());
                         }
                     });
         } catch (Throwable t) { /* deprecated method may be missing */ }
-    }
-
-    private static void hookResourcesGetDisplayMetrics() {
-        try {
-            XposedHelpers.findAndHookMethod(android.content.res.Resources.class,
-                    "getDisplayMetrics",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            DisplayMetrics dm = (DisplayMetrics) param.getResult();
-                            applySpoofedMetrics(dm);
-                        }
-                    });
-        } catch (Throwable t) { logFail("Resources.getDisplayMetrics", t); }
-    }
-
-    private static void hookRefreshRate() {
-        try {
-            XposedHelpers.findAndHookMethod(Display.class, "getRefreshRate",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            param.setResult(REFRESH_RATE_HZ);
-                        }
-                    });
-        } catch (Throwable t) { logFail("Display.getRefreshRate", t); }
     }
 
     private static void hookWindowMetrics(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -142,6 +122,7 @@ public class DisplayHooks {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (!enabled()) return;
                             param.setResult(new Rect(0, 0,
                                     ConfigManager.getScreenWidth(),
                                     ConfigManager.getScreenHeight()));
